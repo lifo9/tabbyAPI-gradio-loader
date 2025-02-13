@@ -59,6 +59,13 @@ parser.add_argument(
     default=None,
     help="TabbyAPI admin key, connect automatically on launch",
 )
+parser.add_argument(
+    "-r",
+    "--root_path",
+    type=str,
+    default=None,
+    help="Root path",
+)
 args = parser.parse_args()
 if args.listen:
     host_url = "0.0.0.0"
@@ -1055,4 +1062,5 @@ webui.launch(
     server_name=host_url,
     server_port=args.port,
     share=args.share,
+    root_path=args.root_path,
 )
