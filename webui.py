@@ -6,6 +6,7 @@ import pathlib
 import aiohttp
 import gradio as gr
 import requests
+from requests import HTTPError
 
 conn_url = None
 conn_key = None
@@ -17,6 +18,7 @@ draft_models = []
 loras = []
 templates = []
 overrides = []
+embedding_models = []
 
 model_load_task = None
 model_load_state = False
@@ -178,6 +180,7 @@ def connect(api_url, admin_key, silent=False):
     global loras
     global templates
     global overrides
+    global embedding_models
 
     try:
         a = requests.get(
@@ -212,6 +215,10 @@ def connect(api_url, admin_key, silent=False):
             url=api_url + "/v1/sampling/override/list", headers={"X-api-key": admin_key}
         )
         so.raise_for_status()
+        em = requests.get(
+            url=api_url + "/v1/model/embedding/list", headers={"X-api-key": admin_key}
+        )
+        em.raise_for_status()
     except Exception as e:
         raise gr.Error(e)
 
@@ -243,6 +250,11 @@ def connect(api_url, admin_key, silent=False):
         overrides.append(override)
     overrides.sort(key=str.lower)
 
+    embedding_models = []
+    for model in em.json().get("data"):
+        embedding_models.append(model.get("id"))
+    embedding_models.sort(key=str.lower)
+
     if not silent:
         gr.Info("TabbyAPI connected.")
         return (
@@ -256,6 +268,9 @@ def connect(api_url, admin_key, silent=False):
             get_override_list(),
             get_current_model(),
             get_current_loras(),
+            get_embedding_model_list(),
+            gr.Textbox(value=", ".join(embedding_models), visible=True),
+            get_current_embedding_model(),
         )
 
 
@@ -287,11 +302,11 @@ def get_current_model():
         return gr.Textbox(value=None)
     params = model_card.get("parameters")
     draft_model_card = params.get("draft")
-    model = f'{model_card.get("id")} (context: {params.get("max_seq_len")}, cache size: {params.get("cache_size")}, rope scale: {params.get("rope_scale")}, rope alpha: {params.get("rope_alpha")})'
+    model = f"{model_card.get('id')} (context: {params.get('max_seq_len')}, cache size: {params.get('cache_size')}, rope scale: {params.get('rope_scale')}, rope alpha: {params.get('rope_alpha')})"
 
     if draft_model_card:
         draft_params = draft_model_card.get("parameters")
-        model += f' | {draft_model_card.get("id")} (rope scale: {draft_params.get("rope_scale")}, rope alpha: {draft_params.get("rope_alpha")})'
+        model += f" | {draft_model_card.get('id')} (rope scale: {draft_params.get('rope_scale')}, rope alpha: {draft_params.get('rope_alpha')})"
     return gr.Textbox(value=model)
 
 
@@ -302,8 +317,20 @@ def get_current_loras():
     lora_list = lo.get("data")
     loras = []
     for lora in lora_list:
-        loras.append(f'{lora.get("id")} (scaling: {lora.get("scaling")})')
+        loras.append(f"{lora.get('id')} (scaling: {lora.get('scaling')})")
     return gr.Textbox(value=", ".join(loras))
+
+
+def get_current_embedding_model():
+    try:
+        model_card = requests.get(
+            url=conn_url + "/v1/model/embedding", headers={"X-api-key": conn_key}
+        ).json()
+        if not model_card.get("id"):
+            return gr.Textbox(value=None)
+        return gr.Textbox(value=model_card.get("id"))
+    except Exception:
+        return gr.Textbox(value=None)
 
 
 def update_loras_table(loras):
@@ -591,7 +618,7 @@ async def download(repo_id, revision, repo_type, folder_name, token, include, ex
             r.raise_for_status()
             content = await r.json()
             gr.Info(
-                f'{repo_type} {repo_id} downloaded to folder: {content.get("download_path")}.'
+                f"{repo_type} {repo_id} downloaded to folder: {content.get('download_path')}."
             )
     except asyncio.CancelledError:
         gr.Info("Download canceled.")
@@ -606,6 +633,62 @@ def cancel_download():
     global download_task
     if download_task:
         download_task.cancel()
+
+
+def get_embedding_model_list():
+    try:
+        r = requests.get(
+            url=conn_url + "/v1/model/embedding/list", headers={"X-api-key": conn_key}
+        )
+        r.raise_for_status()
+        embedding_models = []
+        for model in r.json().get("data"):
+            embedding_models.append(model.get("id"))
+        embedding_models.sort(key=str.lower)
+        return gr.Dropdown(choices=[""] + embedding_models, value=None)
+    except Exception as e:
+        raise gr.Error(e)
+
+
+async def load_embedding_model(embedding_model_name, device):
+    if not embedding_model_name:
+        raise gr.Error("Specify an embedding model to load!")
+
+    request = {
+        "embedding_model_name": embedding_model_name,
+        "embeddings_device": device,
+    }
+
+    try:
+        requests.post(
+            url=conn_url + "/v1/model/embedding/unload",
+            headers={"X-admin-key": conn_key},
+        )
+        r = requests.post(
+            url=conn_url + "/v1/model/embedding/load",
+            headers={"X-admin-key": conn_key},
+            json=request,
+        )
+        r.raise_for_status()
+        gr.Info("Embedding model successfully loaded.")
+        return get_current_embedding_model()
+    except Exception as e:
+        raise gr.Error(e)
+
+
+def unload_embedding_model():
+    try:
+        r = requests.post(
+            url=conn_url + "/v1/model/embedding/unload",
+            headers={"X-admin-key": conn_key},
+        )
+        r.raise_for_status()
+        gr.Info("Embedding model unloaded.")
+        return get_current_embedding_model()
+    except Exception as e:
+        if type(e) is HTTPError:
+            raise gr.Error(e.response.content.decode())
+        raise gr.Error(e)
 
 
 # Auto-attempt connection if admin key is provided
@@ -628,6 +711,7 @@ with gr.Blocks(title="TabbyAPI Gradio Loader") as webui:
     )
     current_model = gr.Textbox(value=init_model_text, label="Current Model:")
     current_loras = gr.Textbox(value=init_lora_text, label="Current Loras:")
+    current_embedding_model = gr.Textbox(value=None, label="Current Embedding Model:")
 
     with gr.Tab("Connect to API"):
         connect_btn = gr.Button(value="Connect", variant="primary")
@@ -647,6 +731,11 @@ with gr.Blocks(title="TabbyAPI Gradio Loader") as webui:
         )
         lora_list = gr.Textbox(
             value=", ".join(loras), label="Available Loras:", visible=bool(conn_key)
+        )
+        embedding_model_list = gr.Textbox(
+            value=", ".join(embedding_models),
+            label="Available Embedding Models:",
+            visible=bool(conn_key),
         )
 
     with gr.Tab("Load Model"):
@@ -855,6 +944,29 @@ with gr.Blocks(title="TabbyAPI Gradio Loader") as webui:
             interactive=True,
         )
 
+    with gr.Tab("Load Embedding Model"):
+        with gr.Row():
+            load_embedding_btn = gr.Button(
+                value="Load Embedding Model", variant="primary"
+            )
+            unload_embedding_btn = gr.Button(
+                value="Unload Embedding Model", variant="stop"
+            )
+
+        with gr.Row():
+            embedding_models_drop = gr.Dropdown(
+                choices=[""],
+                label="Select Embedding Model:",
+                interactive=True,
+            )
+            embeddings_device = gr.Radio(
+                choices=["auto", "cpu", "cuda"],
+                value="cuda",
+                label="Device:",
+                interactive=True,
+                info="Device to load the embedding model on.",
+            )
+
     with gr.Tab("HF Downloader"):
         with gr.Row():
             download_btn = gr.Button(value="Download", variant="primary")
@@ -924,6 +1036,9 @@ with gr.Blocks(title="TabbyAPI Gradio Loader") as webui:
             sampler_override,
             current_model,
             current_loras,
+            embedding_models_drop,
+            embedding_model_list,
+            current_embedding_model,
         ],
     )
 
@@ -1048,6 +1163,16 @@ with gr.Blocks(title="TabbyAPI Gradio Loader") as webui:
         concurrency_limit=1,
     )
     cancel_download_btn.click(fn=cancel_download)
+
+    # Embeddings
+    load_embedding_btn.click(
+        fn=load_embedding_model,
+        inputs=[embedding_models_drop, embeddings_device],
+        outputs=current_embedding_model,
+    )
+    unload_embedding_btn.click(
+        fn=unload_embedding_model, outputs=current_embedding_model
+    )
 
 webui.launch(
     inbrowser=args.autolaunch,
